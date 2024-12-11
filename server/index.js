@@ -1,90 +1,147 @@
-// Import express framework and express-session middleware
+// ไฟล์นี้เป็นส่วนหลักของเว็บแอปพลิเคชัน Express ที่จัดการเกี่ยวกับการ login/logout และการเข้าถึงหน้าต่างๆ
+
+// นำเข้า module ที่จำเป็น
+// - express สำหรับสร้างเว็บเซิร์ฟเวอร์
+// - express-session สำหรับจัดการ session
+// - database.js สำหรับจัดการฐานข้อมูล
 const express = require("express");
 const session = require("express-session");
+const db = require("./database");
 const port = 8080;
 
-// Create express application
+// สร้าง express application
 const app = express();
 
-// Configure session middleware
+// เพิ่ม middleware สำหรับอ่านข้อมูลจากฟอร์ม HTML
+app.use(express.urlencoded({ extended: true }));
+/*
+หากไม่มี express.urlencoded middleware จะเกิดปัญหาดังนี้:
+1. เซิร์ฟเวอร์ไม่สามารถอ่านข้อมูลจากฟอร์ม HTML POST ได้
+2. req.body จะเป็น undefined
+3. เมื่อผู้ใช้ส่งฟอร์มลงทะเบียน อีเมลและรหัสผ่านจะไม่ถูกส่งไปยังเซิร์ฟเวอร์
+
+เพราะว่า:
+- express.urlencoded() เป็น middleware ที่แปลงข้อมูลฟอร์ม HTML ที่ส่งมาในรูปแบบ application/x-www-form-urlencoded ให้เป็นรูปแบบที่ JavaScript อ่านได้
+- ตัวเลือก extended: true อนุญาตให้ส่งข้อมูลที่ซับซ้อน (เช่น nested objects) ผ่านฟอร์มได้
+*/
+
+// ตั้งค่า session middleware
 app.use(
   session({
-    secret: "secret", // Secret key for session encryption
-    resave: true, // Save session on every change
-    saveUninitialized: true, // Save session even when empty
+    secret: "secret", // คีย์ลับสำหรับเข้ารหัส session
+    resave: true, // บันทึก session ทุกครั้งที่มีการเปลี่ยนแปลง
+    saveUninitialized: true, // บันทึก session แม้จะยังไม่มีข้อมูล
+    cookie: {
+      maxAge: 10 * 1000, // อายุ cookie 10 วินาที
+    },
   })
 );
 
-// Route for displaying Session ID
-app.get("/sessionid", (req, res, next) => {
-  // Get session ID from request
-  const id = req.sessionID;
-  // Send session ID back to display
-  res.send(`<h1>Session ID: ${id}</h1>`);
-});
+// middleware ตรวจสอบการยืนยันตัวตน
+// - ตรวจสอบ session ID จากฐานข้อมูล
+// - ถ้ามี session ID ให้ไปต่อ
+// - ถ้าไม่มีส่งรหัส 403 forbidden กลับไป
+const auth = async (req, res, next) => {
+  const id = await db.getSessionIDFromDatabase(req.sessionID);
+  if (id) {
+    next();
+  } else {
+    res.sendStatus(403);
+  }
+};
 
-// Add middleware for reading form data
-app.use(express.urlencoded({ extended: true }));
-/*
-Without the express.urlencoded({ extended: true }) middleware, these issues would occur:
-1. Server cannot read data from HTML POST forms
-2. req.body would be undefined
-3. When users submit registration form, email and password won't be sent to server
-
-Because:
-- express.urlencoded() is middleware that converts HTML form data sent as application/x-www-form-urlencoded into JavaScript-readable format
-- The extended: true option allows sending complex data (like nested objects) through forms
-*/
-
-app.get("/", (req, res) => {
-  res.send("<h1>Home page</h1>");
-});
-
-// Route for registration page ('/register')
-// Display form for email and password input
-app.get("/register", (req, res) => {
-  res.send(`
-    <form action="/register" method="post">
-      <input type="email" name="email" placeholder="Email" autocomplete="off" />
-      <input type="password" name="password" placeholder="Password" autocomplete="off" />
-      <button type="submit">Register</button>
+// จัดการ route หน้าแรก ('/')
+// - ตรวจสอบ session ID จากฐานข้อมูล
+// - ถ้ามี session ID และพบในฐานข้อมูล แสดงปุ่ม Logout
+// - ถ้าไม่มี session ID หรือไม่พบในฐานข้อมูล แสดงปุ่ม Login
+app.get("/", async (req, res, next) => {
+  const id = await db.getSessionIDFromDatabase(req.sessionID);
+  if (req.sessionID && id) {
+    res.send(`
+    <h1>Home Page</h1>
+    <a href="/products">Products</a>
+    <a href="/users">Users</a>
+    <hr>
+    <form action="/" method="post">
+      <input type="hidden" name="status" value="logout" />
+      <button type="submit">Logout</button>
     </form>
+    `);
+  } else {
+    res.send(`
+    <h1>Home Page</h1>
+    <a href="/products">Products</a>
+    <a href="/users">Users</a>
+    <hr>
+    <form action="/" method="post">
+      <input type="hidden" name="status" value="login" />
+      <button type="submit">Login</button>
+    </form>
+    `);
+  }
+});
+
+// จัดการ route สำหรับ Login/Logout
+// - รับ request POST จากฟอร์ม login/logout
+// - ถ้าเป็น login บันทึก session ID ลงฐานข้อมูล
+// - ถ้าเป็น logout ลบ session ID ออกจากฐานข้อมูล
+// - redirect กลับไปหน้าแรกเมื่อเสร็จสิ้น
+app.post("/", async (req, res, next) => {
+  const status = req.body.status;
+  try {
+    if (status === "login") {
+      await db.setSessionIDToDatabase("Anonymous", req.sessionID);
+    } else {
+      await db.clearSessionFromDatabase(req.sessionID);
+    }
+    res.redirect("/");
+  } catch (error) {
+    next(error);
+  }
+});
+
+// จัดการ route แสดงหน้า Products
+// - ต้องผ่านการตรวจสอบ auth ก่อน
+// - แสดงหน้า Products พร้อมลิงก์กลับหน้าแรก
+app.get("/products", auth, (req, res, next) => {
+  res.send(`
+    <h1>Products Page</h1>
+    <hr>
+    <a href="/">Back Home</a>
   `);
 });
 
-// Registration at http://localhost:8080/register
-// Route for registration - receive form data and save to session
-app.post("/register", (req, res) => {
-  const email = req.body.email;
-  const password = req.body.password;
-  req.session.data = { email, password };
-  res.redirect("/profile");
+// จัดการ route แสดงหน้า Users
+// - ต้องผ่านการตรวจสอบ auth ก่อน
+// - แสดงหน้า Users พร้อมลิงก์กลับหน้าแรก
+app.get("/users", auth, (req, res, next) => {
+  res.send(`
+    <h1>Users Page</h1>
+    <hr>
+    <a href="/">Back Home</a>
+  `);
 });
 
-// Route for displaying profile information
-app.get("/profile", (req, res) => {
-  if (req.session.data) {
-    res.json(req.session.data);
-  } else {
-    res.send("No data");
-  }
+// จัดการ route แสดงหน้า User
+// - ต้องผ่านการตรวจสอบ auth ก่อน
+// - แสดงหน้า User พร้อมลิงก์กลับหน้าแรก
+app.get("/user", auth, (req, res, next) => {
+  res.send(`
+    <h1>User Page</h1>
+    <hr>
+    <a href="/">Back Home</a>
+  `);
 });
 
-// Route for homepage ('/')
-app.get("/", (req, res, next) => {
-  // Check if page view count exists
-  if (req.session.view) {
-    // If exists, increment by 1
-    req.session.view += 1;
-  } else {
-    // If not exists, start at 1
-    req.session.view = 1;
-  }
-  // Send message showing number of times user has visited this page
-  res.send(`You have visited this page ${req.session.view} times`);
+// จัดการ route สำหรับหน้าที่ไม่พบ (404 Not Found)
+// - ส่งรหัส 404 กลับไปเมื่อไม่พบหน้าที่ร้องขอ
+app.use((req, res) => {
+  res.sendStatus(404);
 });
 
-// Start server on port 8080
+// เริ่มต้นเซิร์ฟเวอร์ที่พอร์ต 8080
+// - แสดงข้อความยืนยันการทำงานของเซิร์ฟเวอร์
+// - แสดง URL สำหรับเข้าถึงเว็บแอป
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
   console.log(`http://localhost:${port}`);
